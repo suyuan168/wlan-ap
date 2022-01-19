@@ -6,7 +6,7 @@ PKG_RELEASE:=1
 PKG_SOURCE_URL=https://github.com/blogic/ucentral-schema.git
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_DATE:=2022-01-17
-PKG_SOURCE_VERSION:=311bf9813564a790f3f6deb3055a501fb152723a
+PKG_SOURCE_VERSION:=8f5beb10b3a67b011ea60c7becf2eee6dfaea51d
 
 PKG_MAINTAINER:=John Crispin <john@phrozen.org>
 PKG_LICENSE:=BSD-3-Clause
