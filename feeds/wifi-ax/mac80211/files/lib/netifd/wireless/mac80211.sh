@@ -84,6 +84,8 @@ drv_mac80211_init_iface_config() {
 	config_add_int dtim_period
 	config_add_int start_disabled
 
+	config_add_int fils_discovery_max_interval
+
 	# mesh
 	config_add_string mesh_id
 	config_add_int $MP_CONFIG_INT
@@ -132,7 +134,7 @@ mac80211_hostapd_setup_base() {
 
 	json_select config
 
-	[ "$auto_channel" -gt 0 ] && channel=acs_survey
+	[ "$auto_channel" -gt 0 ] && channel=0
 
 	[ "$auto_channel" -gt 0 ] && json_get_vars acs_exclude_dfs
 	[ -n "$acs_exclude_dfs" ] && [ "$acs_exclude_dfs" -gt 0 ] &&
@@ -488,15 +490,25 @@ mac80211_hostapd_setup_bss() {
 
 	hostapd_set_bss_options hostapd_cfg "$phy" "$vif" || return 1
 	json_get_vars wds wds_bridge dtim_period max_listen_int start_disabled
+        json_get_vars fils_discovery_max_interval
 
 	set_default wds 0
 	set_default start_disabled 0
+	set_default fils_discovery_max_interval 0
 
 	[ "$wds" -gt 0 ] && {
 		append hostapd_cfg "wds_sta=1" "$N"
 		[ -n "$wds_bridge" ] && append hostapd_cfg "wds_bridge=$wds_bridge" "$N"
 	}
 	[ "$staidx" -gt 0 -o "$start_disabled" -eq 1 ] && append hostapd_cfg "start_disabled=1" "$N"
+
+	[ "$band" = "6g" ] && {
+		if [ "$fils_discovery_max_interval" -gt 0 ] && [ "$fils_discovery_max_interval" -le 20 ]; then
+			append hostapd_cfg "fils_discovery_max_interval=$fils_discovery_max_interval" "$N"
+		else
+			append hostapd_cfg "fils_discovery_max_interval=20" "$N"
+		fi
+	}
 
 	cat >> /var/run/hostapd-$phy.conf <<EOF
 $hostapd_cfg
@@ -718,6 +730,7 @@ mac80211_prepare_vif() {
 			[ "$wds" -gt 0 ] && wdsflag="4addr on"
 			mac80211_iw_interface_add "$phy" "$ifname" managed "$wdsflag" || return
 			if [ "$wds" -gt 0 ]; then
+				echo 1 > /sys/kernel/debug/ieee80211/$phy/netdev\:$ifname/disable_offload
 				iw "$ifname" set 4addr on
 			else
 				iw "$ifname" set 4addr off
@@ -1049,6 +1062,8 @@ drv_mac80211_setup() {
 		wireless_set_retry 0
 		return 1
 	}
+	
+	[ "$band" = "6g" ] && set_default multiple_bssid 1
 
 	wireless_set_data phy="$phy"
 	[ -z "$(uci -q -P /var/state show wireless._${phy})" ] && uci -q -P /var/state set wireless._${phy}=phy
@@ -1162,10 +1177,13 @@ drv_mac80211_setup() {
 		if [ "$no_reload" != "0" ]; then
 			add_ap=1
 			ubus wait_for hostapd
-			local hostapd_res="$(ubus call hostapd config_add "{\"iface\":\"$primary_ap\", \"config\":\"${hostapd_conf_file}\"}")"
+			local hostapd_res
+			[ -f /tmp/wifi_fail_test ] || hostapd_res="$(ubus call hostapd config_add "{\"iface\":\"$primary_ap\", \"config\":\"${hostapd_conf_file}\"}")"
 			ret="$?"
+			rm -f /tmp/wifi_fail_test
 			[ "$ret" != 0 -o -z "$hostapd_res" ] && {
-				wireless_setup_failed HOSTAPD_START_FAILED
+				logger failed to start wifi trying again
+			#	wireless_setup_failed HOSTAPD_START_FAILED
 				return
 			}
 			wireless_add_process "$(jsonfilter -s "$hostapd_res" -l 1 -e @.pid)" "/usr/sbin/hostapd" 1 1

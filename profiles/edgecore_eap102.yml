@@ -10,12 +10,5 @@ feeds:
 include:
   - wifi-ax
   - ucentral-ap
-packages:
-  - kmod-bluetooth
-  - kmod-bluetooth_6lowpan
-  - bluez-libs
-  - bluez-daemon
-  - bluez-utils
-  - usbutils
 diffconfig: |
   CONFIG_KERNEL_IPQ_MEM_PROFILE=0

@@ -8,8 +8,6 @@ feeds:
 
 include:
   - webui
-  - openflow
-  - fbwifi
   - chilli-redirect
   - qosify
 
@@ -17,6 +15,7 @@ packages:
   - atfpolicy
   - kmod-batman-adv
   - batctl-default
+  - bind-dig
   - cJSON
   - curl
   - dnsmasq-full
@@ -29,7 +28,9 @@ packages:
   - kmod-sched-bpf
   - lldpd
   - maverick
-  - opennds
+  - uspot
+  - spotfilter
+  - radius-gw-proxy
   - radsecproxy
   - ratelimit
   - rtty-openssl
@@ -43,6 +44,7 @@ packages:
   - ucentral-wifi
   - ucentral-tools
   - ucode
+  - unetd
   - udhcpsnoop
   - udnssnoop
   - usteer
@@ -50,6 +52,7 @@ packages:
   - libustream-openssl
   - udevmand
   - umdns
+  - oping
   - vxlan
   - wpad-openssl
 diffconfig: |

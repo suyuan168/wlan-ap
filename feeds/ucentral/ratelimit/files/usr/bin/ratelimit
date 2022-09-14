@@ -28,15 +28,13 @@ delclient() {
 	local mac=$2
 	local id=$3
 	
-	logger "ratelimit: delete old client entries"
+	logger "ratelimit: delete old client entries $1 $2"
 
-	[ -z "$id" ] && id=$(get_id ${mac//:})
+	id=$(get_id ${mac//:})
 
 	TC filter del dev $iface protocol all parent 1: prio 1 u32 match ether dst $mac flowid 1:$id
-	TC class del dev $iface parent 1:1 classid 1:$id
 	
 	TC filter del dev $ifb protocol all parent 1: prio 1 u32 match ether src $mac flowid 1:$id
-	TC class del dev $ifb parent 1:1 classid 1:$id
 }
 
 ingress=0
@@ -72,7 +70,7 @@ addclient() {
 
 	local id=$(get_id ${mac//:})
 
-	logger "ratelimit: add new client entries for $2 $egress $ingress"
+	logger "ratelimit: add new client entries for $1 $2 $egress $ingress"
 
 	TC class add dev $iface parent 1:1 classid 1:$id htb rate 1mbit ceil ${egress}mbit burst 2k prio 1
 	TC qdisc add dev $iface parent 1:$id handle $id: sfq perturb 10
@@ -101,6 +99,7 @@ deliface() {
 
 found=0
 find_ssid() {
+	local ssid
 	config_get ssid $1 ssid
 	[ "$ssid" == "$2" ] || return
 	found=1
@@ -112,19 +111,25 @@ addiface() {
 	local ssid
 
 
-	[ -d /sys/class/net/$ifb/ ] && {
+	[ -f /tmp/ratelimit.$iface -o -d /sys/class/net/$ifb/ ] && {
 		return 0
 	}
+	
+	echo -n startup > /tmp/ratelimit.$iface
 
 	sleep 2
-	ssid=$(ubus call network.wireless status | jsonfilter -e '@[*].interfaces[@.ifname="'"$iface"'"].config.ssid')
+	ssid=$(ubus call hostapd.$iface get_status | jsonfilter -e '@.ssid')
 	[ -z "$ssid" ] && {
+		rm /tmp/ratelimit.$iface
 		logger "ratelimit: failed to lookup ssid"
 		exit 1
 	}
 	config_load ratelimit
 	config_foreach find_ssid rate $ssid
-	[ "$found" -eq 0 ] && exit 0
+	[ "$found" -eq 0 ] && {
+		rm /tmp/ratelimit.$iface
+		exit 0
+	}
 	logger "ratelimit: adding new iface settings"
 
 	echo -n $ssid > /tmp/ratelimit.$iface

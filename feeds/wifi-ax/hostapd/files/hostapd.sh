@@ -76,6 +76,15 @@ hostapd_append_wpa_key_mgmt() {
 		;;
 	esac
 
+	[ "$fils" -gt 0 ] && {
+		case "$auth_type" in
+			eap*)
+				append wpa_key_mgmt FILS-SHA256
+				[ "${ieee80211r:-0}" -gt 0 ] && append wpa_key_mgmt FT-FILS-SHA256
+			;;
+		esac
+	}
+
 	[ "$auth_osen" = "1" ] && append wpa_key_mgmt "OSEN"
 }
 
@@ -110,11 +119,13 @@ hostapd_common_add_device_config() {
 	config_add_int maxassoc
 
 	config_add_string acs_chan_bias
+	config_add_boolean acs_exclude_dfs
 	config_add_array hostapd_options
 
 	config_add_int airtime_mode
 
 	config_add_boolean multiple_bssid rnr_beacon he_co_locate ema
+
 	hostapd_add_log_config
 }
 
@@ -127,7 +138,7 @@ hostapd_prepare_device_config() {
 	json_get_vars country country3 country_ie beacon_int:100 dtim_period:2 doth require_mode legacy_rates \
 		acs_chan_bias local_pwr_constraint spectrum_mgmt_required airtime_mode cell_density \
 		rts_threshold beacon_rate rssi_reject_assoc_rssi rssi_ignore_probe_request maxassoc \
-		multiple_bssid he_co_locate rnr_beacon ema
+		multiple_bssid he_co_locate rnr_beacon ema acs_exclude_dfs
 
 	hostapd_set_log_options base_cfg
 
@@ -141,6 +152,7 @@ hostapd_prepare_device_config() {
 	set_default rnr_beacon 0
 	set_default multiple_bssid 0
 	set_default ema 0
+	set_default acs_exclude_dfs 0
 
 	[ -n "$country" ] && {
 		append base_cfg "country_code=$country" "$N"
@@ -237,6 +249,7 @@ hostapd_prepare_device_config() {
 	[ "$he_co_locate" -gt 0 ] && append base_cfg "he_co_locate=$he_co_locate" "$N"
 	[ "$multiple_bssid" -gt 0 ] && append base_cfg "multiple_bssid=$multiple_bssid" "$N"
 	[ "$ema" -gt 0 ] && append base_cfg "ema=$ema" "$N"
+	[ "$acs_exclude_dfs" -gt 0 ] && append base_cfg "acs_exclude_dfs=$acs_exclude_dfs" "$N"
 
 	json_get_values opts hostapd_options
 	for val in $opts; do
@@ -340,6 +353,7 @@ hostapd_common_add_bss_config() {
 	config_add_int sae_pwe
 
 	config_add_string 'owe_transition_bssid:macaddr' 'owe_transition_ssid:string'
+	config_add_string owe_transition_ifname
 
 	config_add_boolean iw_enabled iw_internet iw_asra iw_esr iw_uesa
 	config_add_int iw_access_network_type iw_venue_group iw_venue_type
@@ -362,7 +376,7 @@ hostapd_common_add_bss_config() {
 	config_add_array airtime_sta_weight
 	config_add_int airtime_bss_weight airtime_bss_limit
 
-	config_add_boolean multicast_to_unicast proxy_arp per_sta_vif
+	config_add_boolean multicast_to_unicast multicast_to_unicast_all proxy_arp per_sta_vif
 
 	config_add_array hostapd_bss_options
 	config_add_boolean default_disabled
@@ -373,6 +387,9 @@ hostapd_common_add_bss_config() {
 
 	config_add_int eap_server
 	config_add_string eap_user_file ca_cert server_cert private_key private_key_passwd server_id
+
+	config_add_boolean fils
+	config_add_string fils_dhcp
 
 	config_add_boolean ratelimit
 }
@@ -523,6 +540,69 @@ append_airtime_sta_weight() {
 	[ -n "$1" ] && append bss_conf "airtime_sta_weight=$1" "$N"
 }
 
+append_radius_server() {
+
+	json_get_vars \
+		auth_server auth_secret auth_port \
+		dae_client dae_secret dae_port \
+		ownip radius_client_addr \
+		eap_reauth_period request_cui \
+		erp_domain mobility_domain \
+		fils_realm fils_dhcp
+
+	# legacy compatibility
+	[ -n "$auth_server" ] || json_get_var auth_server server
+	[ -n "$auth_port" ] || json_get_var auth_port port
+	[ -n "$auth_secret" ] || json_get_var auth_secret key
+
+	[ "$fils" -gt 0 ] && {
+		set_default erp_domain "$mobility_domain"
+		set_default erp_domain "$(echo "$ssid" | md5sum | head -c 8)"
+		set_default fils_realm "$erp_domain"
+
+		append bss_conf "erp_send_reauth_start=1" "$N"
+		append bss_conf "erp_domain=$erp_domain" "$N"
+		append bss_conf "fils_realm=$fils_realm" "$N"
+		append bss_conf "fils_cache_id=$(echo "$fils_realm" | md5sum | head -c 4)" "$N"
+
+		[ "$fils_dhcp" = "*" ] && {
+			json_get_values network network
+			fils_dhcp=
+			for net in $network; do
+				fils_dhcp="$(ifstatus "$net" | jsonfilter -e '@.data.dhcpserver')"
+				[ -n "$fils_dhcp" ] && break
+			done
+
+			[ -z "$fils_dhcp" -a -n "$network_bridge" -a -n "$network_ifname" ] && \
+				fils_dhcp="$(udhcpc -B -n -q -s /lib/netifd/dhcp-get-server.sh -t 1 -i "$network_ifname" 2>/dev/null)"
+		}
+		[ -n "$fils_dhcp" ] && append bss_conf "dhcp_server=$fils_dhcp" "$N"
+	}
+
+	set_default auth_port 1812
+	set_default dae_port 3799
+	set_default request_cui 0
+
+	[ "$eap_server" -eq 0 ] && {
+		append bss_conf "auth_server_addr=$auth_server" "$N"
+		append bss_conf "auth_server_port=$auth_port" "$N"
+		append bss_conf "auth_server_shared_secret=$auth_secret" "$N"
+	}
+
+	[ "$request_cui" -gt 0 ] && append bss_conf "radius_request_cui=$request_cui" "$N"
+	[ -n "$eap_reauth_period" ] && append bss_conf "eap_reauth_period=$eap_reauth_period" "$N"
+
+	[ -n "$dae_client" -a -n "$dae_secret" ] && {
+		append bss_conf "radius_das_port=$dae_port" "$N"
+		append bss_conf "radius_das_client=$dae_client $dae_secret" "$N"
+	}
+	json_for_each_item append_radius_auth_req_attr radius_auth_req_attr
+
+	[ -n "$ownip" ] && append bss_conf "own_ip_addr=$ownip" "$N"
+	[ -n "$radius_client_addr" ] && append bss_conf "radius_client_addr=$radius_client_addr" "$N"
+	[ "$macfilter" = radius ] && append bss_conf "macaddr_acl=2" "$N"
+}
+
 hostapd_set_bss_options() {
 	local var="$1"
 	local phy="$2"
@@ -545,10 +625,11 @@ hostapd_set_bss_options() {
 		bss_load_update_period chan_util_avg_period sae_require_mfp sae_pwe \
 		multi_ap multi_ap_backhaul_ssid multi_ap_backhaul_key skip_inactivity_poll \
 		airtime_bss_weight airtime_bss_limit airtime_sta_weight \
-		multicast_to_unicast proxy_arp per_sta_vif \
+		multicast_to_unicast_all proxy_arp per_sta_vif \
 		eap_server eap_user_file ca_cert server_cert private_key private_key_passwd server_id \
-		vendor_elements
+		vendor_elements fils
 
+	set_default fils 0
 	set_default isolate 0
 	set_default maxassoc 0
 	set_default max_inactivity 0
@@ -569,6 +650,8 @@ hostapd_set_bss_options() {
 	set_default airtime_bss_weight 0
 	set_default airtime_bss_limit 0
 	set_default eap_server 0
+
+	/usr/sbin/hostapd -vfils || fils=0
 
 	append bss_conf "ctrl_interface=/var/run/hostapd"
 	if [ "$isolate" -gt 0 ]; then
@@ -622,7 +705,7 @@ hostapd_set_bss_options() {
 			set_default ieee80211w 2
 			set_default sae_require_mfp 1
 		;;
-		psk-sae|eap-eap256)
+		psk-sae|psk2-radius|eap-eap256)
 			set_default ieee80211w 1
 			set_default sae_require_mfp 1
 		;;
@@ -634,15 +717,20 @@ hostapd_set_bss_options() {
 
 	case "$auth_type" in
 		none|owe)
-			json_get_vars owe_transition_bssid owe_transition_ssid
+			json_get_vars owe_transition_bssid owe_transition_ssid owe_transition_ifname
 
 			[ -n "$owe_transition_ssid" ] && append bss_conf "owe_transition_ssid=\"$owe_transition_ssid\"" "$N"
 			[ -n "$owe_transition_bssid" ] && append bss_conf "owe_transition_bssid=$owe_transition_bssid" "$N"
+			[ -n "$owe_transition_ifname" ] && append bss_conf "owe_transition_ifname=$owe_transition_ifname" "$N"
 
 			wps_possible=1
 			# Here we make the assumption that if we're in open mode
 			# with WPS enabled, we got to be in unconfigured state.
 			wps_not_configured=1
+			[ "$macfilter" = radius ] && {
+				append_radius_server
+				vlan_possible=1
+			}
 		;;
 		psk|sae|psk-sae)
 			json_get_vars key wpa_psk_file
@@ -666,41 +754,9 @@ hostapd_set_bss_options() {
 			wps_possible=1
 		;;
 		eap|eap192|eap-eap256|eap256)
-			json_get_vars \
-				auth_server auth_secret auth_port \
-				dae_client dae_secret dae_port \
-				ownip radius_client_addr \
-				eap_reauth_period request_cui
-
+			append_radius_server
 			# radius can provide VLAN ID for clients
 			vlan_possible=1
-
-			# legacy compatibility
-			[ -n "$auth_server" ] || json_get_var auth_server server
-			[ -n "$auth_port" ] || json_get_var auth_port port
-			[ -n "$auth_secret" ] || json_get_var auth_secret key
-
-			set_default auth_port 1812
-			set_default dae_port 3799
-			set_default request_cui 0
-
-			[ "$eap_server" -eq 0 ] && {
-				append bss_conf "auth_server_addr=$auth_server" "$N"
-				append bss_conf "auth_server_port=$auth_port" "$N"
-				append bss_conf "auth_server_shared_secret=$auth_secret" "$N"
-			}
-
-			[ "$request_cui" -gt 0 ] && append bss_conf "radius_request_cui=$request_cui" "$N"
-			[ -n "$eap_reauth_period" ] && append bss_conf "eap_reauth_period=$eap_reauth_period" "$N"
-
-			[ -n "$dae_client" -a -n "$dae_secret" ] && {
-				append bss_conf "radius_das_port=$dae_port" "$N"
-				append bss_conf "radius_das_client=$dae_client $dae_secret" "$N"
-			}
-			json_for_each_item append_radius_auth_req_attr radius_auth_req_attr
-
-			[ -n "$ownip" ] && append bss_conf "own_ip_addr=$ownip" "$N"
-			[ -n "$radius_client_addr" ] && append bss_conf "radius_client_addr=$radius_client_addr" "$N"
 			append bss_conf "eapol_key_index_workaround=1" "$N"
 			append bss_conf "ieee8021x=1" "$N"
 
@@ -712,6 +768,11 @@ hostapd_set_bss_options() {
 			hostapd_append_wep_key bss_conf
 			append bss_conf "wep_default_key=$wep_keyidx" "$N"
 			[ -n "$wep_rekey" ] && append bss_conf "wep_rekey_period=$wep_rekey" "$N"
+		;;
+		psk2-radius)
+			append bss_conf "wpa_psk_radius=3" "$N"
+			append_radius_server
+			vlan_possible=1
 		;;
 	esac
 
@@ -825,14 +886,20 @@ hostapd_set_bss_options() {
 			set_default mobility_domain "$(echo "$ssid" | md5sum | head -c 4)"
 			set_default ft_over_ds 1
 			set_default reassociation_deadline 1000
+			skip_kh_setup=0
 
 			case "$auth_type" in
-				psk|sae|psk-sae)
+				psk|psk-sae)
 					set_default ft_psk_generate_local 1
+					skip_kh_setup="$ft_psk_generate_local"
 				;;
 				*)
 					set_default ft_psk_generate_local 0
 				;;
+			esac
+
+			case "$auth_type" in
+				*sae*) skip_kh_setup=0;;
 			esac
 
 			[ -n "$network_ifname" ] && append bss_conf "ft_iface=$network_ifname" "$N"
@@ -842,7 +909,7 @@ hostapd_set_bss_options() {
 			append bss_conf "reassociation_deadline=$reassociation_deadline" "$N"
 			[ -n "$nasid" ] || append bss_conf "nas_identifier=${macaddr//\:}" "$N"
 
-			if [ "$ft_psk_generate_local" -eq "0" ]; then
+			if [ "$skip_kh_setup" -eq "0" ]; then
 				json_get_vars r0_key_lifetime r1_key_holder pmk_r1_push
 				json_get_values r0kh r0kh
 				json_get_values r1kh r1kh
@@ -869,6 +936,10 @@ hostapd_set_bss_options() {
 				done
 			fi
 		fi
+		if [ "$fils" -gt 0 ]; then
+			json_get_vars fils_realm
+			set_default fils_realm "$(echo "$ssid" | md5sum | head -c 8)"
+		fi
 
 		append bss_conf "wpa_disable_eapol_key_retries=$wpa_disable_eapol_key_retries" "$N"
 
@@ -893,7 +964,7 @@ hostapd_set_bss_options() {
 		fi
 
 		append bss_conf "okc=$auth_cache" "$N"
-		[ "$auth_cache" = 0 ] && append bss_conf "disable_pmksa_caching=1" "$N"
+		[ "$auth_cache" = 0 -a "$fils" = 0 ] && append bss_conf "disable_pmksa_caching=1" "$N"
 
 		# RSN -> allow management frame protection
 		case "$ieee80211w" in
@@ -1058,6 +1129,7 @@ hostapd_set_bss_options() {
 
 	if [ "$eap_server" = "1" ]; then
 		append bss_conf "eap_server=1" "$N"
+		append bss_conf "eap_server_erp=1" "$N"
 		[ -n "$eap_user_file" ] && append bss_conf "eap_user_file=$eap_user_file" "$N"
 		[ -n "$ca_cert" ] && append bss_conf "ca_cert=$ca_cert" "$N"
 		[ -n "$server_cert" ] && append bss_conf "server_cert=$server_cert" "$N"
@@ -1066,9 +1138,9 @@ hostapd_set_bss_options() {
 		[ -n "$server_id" ] && append bss_conf "server_id=$server_id" "$N"
 	fi
 
-	set_default multicast_to_unicast 0
-	if [ "$multicast_to_unicast" -gt 0 ]; then
-		append bss_conf "multicast_to_unicast=$multicast_to_unicast" "$N"
+	set_default multicast_to_unicast_all 0
+	if [ "$multicast_to_unicast_all" -gt 0 ]; then
+		append bss_conf "multicast_to_unicast=$multicast_to_unicast_all" "$N"
 	fi
 	set_default proxy_arp 0
 	if [ "$proxy_arp" -gt 0 ]; then
@@ -1198,8 +1270,8 @@ wpa_supplicant_set_fixed_freq() {
 	append network_data "frequency=$freq" "$N$T"
 	case "$htmode" in
 		NOHT) append network_data "disable_ht=1" "$N$T";;
-		HT20|VHT20|HE20) append network_data "disable_ht40=1" "$N$T";;
-		HT40*|VHT40*|VHT80*|VHT160*) append network_data "ht40=1" "$N$T";;
+		HE20|HT20|VHT20) append network_data "disable_ht40=1" "$N$T";;
+		HT40*|VHT40|VHT80|VHT160|HE40|HE80|HE160) append network_data "ht40=1" "$N$T";;
 	esac
 	case "$htmode" in
 		VHT*) append network_data "vht=1" "$N$T";;
@@ -1224,7 +1296,7 @@ wpa_supplicant_add_network() {
 	json_get_vars \
 		ssid bssid key \
 		basic_rate mcast_rate \
-		ieee80211w ieee80211r \
+		ieee80211w ieee80211r fils \
 		multi_ap \
 		default_disabled
 
@@ -1316,6 +1388,7 @@ wpa_supplicant_add_network() {
 
 			json_get_vars eap_type identity anonymous_identity ca_cert ca_cert_usesystem
 
+			[ "$fils" -gt 0 ] && append network_data "erp=1" "$N$T"
 			if [ "$ca_cert_usesystem" -eq "1" -a -f "/etc/ssl/certs/ca-certificates.crt" ]; then
 				append network_data "ca_cert=\"/etc/ssl/certs/ca-certificates.crt\"" "$N$T"
 			else
